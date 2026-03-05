@@ -21,8 +21,19 @@ WHITE = "#FFFFFF"
 EXCEL_FILE = "Jenn.xlsx"
 EXCEL_SHEET = "Renewal book 2026"
 STATUS_FILE = "status_store.json"
+TRACKER_FILE = "Client Renewal & Budget Tracker.xlsx"
+TRACKER_SHEET = "Corporates & Parastatals"
 
-STATUS_OPTIONS = ["On going", "Renewed", "Lost", "Not renewing", "Awaiting POP"]
+STATUS_OPTIONS = ["On going", "Renewed", "Organic growth", "Lost", "Not renewing", "Awaiting POP"]
+TREND_OPTIONS = [
+    "RATE REDUCTION",
+    "SUM INSURED REDUCED",
+    "COVER REDUCED",
+    "HIGH DEDUCTIBLE",
+    "RATE INCREASED",
+    "COVERS UPSOLD",
+    "LOST",
+]
 MONTHS = [
     "January",
     "February",
@@ -125,20 +136,6 @@ def traffic_light(status, dleft):
     return "🟩"
 
 
-def to_iso_date(val) -> str:
-    if val is None:
-        return ""
-    if isinstance(val, date):
-        return val.isoformat()
-    s = str(val).strip()
-    if not s or s.lower() in ["nan", "nat"]:
-        return ""
-    try:
-        return pd.to_datetime(s, errors="coerce").date().isoformat()
-    except Exception:
-        return ""
-
-
 def find_logo_bytes() -> tuple[str | None, str | None]:
     app_dir = Path(__file__).parent.resolve()
     candidates = []
@@ -182,6 +179,54 @@ def save_status_store(store: dict) -> None:
         json.dump(store, f, indent=4)
 
 
+def normalize_match_key(val) -> str:
+    s = str(val).strip().lower()
+    if s in {"", "nan", "none"}:
+        return ""
+    return " ".join(s.split())
+
+
+@st.cache_data(ttl=120)
+def load_budget_tracker_data() -> pd.DataFrame:
+    tracker = pd.read_excel(
+        TRACKER_FILE,
+        sheet_name=TRACKER_SHEET,
+        header=9,
+        usecols="A:L",
+        engine="openpyxl",
+    )
+    tracker.columns = [str(c).strip() for c in tracker.columns]
+
+    needed = [
+        "CLIENT #",
+        "CLIENT NAME",
+        "Renewed Amount",
+        "Budget & Renewed Amount Variance",
+        "Comments on Variance",
+        "Trends on Variance",
+    ]
+    missing = [c for c in needed if c not in tracker.columns]
+    if missing:
+        raise ValueError(
+            f"Missing required column(s) in {TRACKER_FILE}/{TRACKER_SHEET}: {', '.join(missing)}"
+        )
+
+    out = tracker[needed].copy()
+    out = out.dropna(subset=["CLIENT #", "CLIENT NAME"], how="all")
+    out["CLIENT #"] = out["CLIENT #"].astype(str).str.strip()
+    out["CLIENT NAME"] = out["CLIENT NAME"].astype(str).str.strip()
+    out["client_number_key"] = out["CLIENT #"].apply(normalize_match_key)
+    out["client_name_key"] = out["CLIENT NAME"].apply(normalize_match_key)
+
+    out["Renewed Amount"] = pd.to_numeric(out["Renewed Amount"], errors="coerce")
+    out["Budget & Renewed Amount Variance"] = pd.to_numeric(
+        out["Budget & Renewed Amount Variance"], errors="coerce"
+    )
+    out["Comments on Variance"] = out["Comments on Variance"].fillna("").astype(str)
+    out["Trends on Variance"] = out["Trends on Variance"].fillna("").astype(str)
+    return out
+
+
 @st.cache_data(ttl=30)
 def load_events_from_excel() -> pd.DataFrame:
     src = pd.read_excel(EXCEL_FILE, sheet_name=EXCEL_SHEET, engine="openpyxl")
@@ -214,18 +259,62 @@ def load_events_from_excel() -> pd.DataFrame:
 
             rows.append(
                 {
+                    "StoreKey": key,
                     "CLIENT NUMBER": client_number,
                     "CLIENT NAME": client_name,
                     "Year": this_year,
                     "Month": month,
-                    "Amount": float(amt),
+                    "Amount": saved.get("amount", float(amt)),
                     "Status": saved.get("status", "On going"),
-                    "Notes": saved.get("notes", ""),
-                    "Renewed On": saved.get("renewed_on", ""),
-                }
+                                    }
             )
 
-    return pd.DataFrame(rows)
+    events = pd.DataFrame(rows)
+    events["client_number_key"] = events["CLIENT NUMBER"].apply(normalize_match_key)
+    events["client_name_key"] = events["CLIENT NAME"].apply(normalize_match_key)
+
+    tracker = load_budget_tracker_data()
+    tracker_cols = [
+        "Renewed Amount",
+        "Budget & Renewed Amount Variance",
+        "Comments on Variance",
+        "Trends on Variance",
+    ]
+
+    by_number = (
+        tracker[["client_number_key"] + tracker_cols]
+        .dropna(subset=["client_number_key"])
+        .drop_duplicates("client_number_key", keep="first")
+    )
+    merged = events.merge(by_number, on="client_number_key", how="left")
+
+    by_name = (
+        tracker[["client_name_key"] + tracker_cols]
+        .dropna(subset=["client_name_key"])
+        .drop_duplicates("client_name_key", keep="first")
+    )
+    need_name_fill = merged["Renewed Amount"].isna()
+    if need_name_fill.any():
+        fill_from_name = merged.loc[need_name_fill, ["client_name_key"]].merge(
+            by_name, on="client_name_key", how="left"
+        )
+        for col in tracker_cols:
+            merged.loc[need_name_fill, col] = fill_from_name[col].values
+
+    # Apply manual overrides stored from previous edits.
+    for idx, row in merged.iterrows():
+        saved = status_store.get(row["StoreKey"], {})
+        if "renewed_amount" in saved:
+            merged.at[idx, "Renewed Amount"] = saved.get("renewed_amount")
+        if "comments_on_variance" in saved:
+            merged.at[idx, "Comments on Variance"] = saved.get("comments_on_variance", "")
+        if "trends_on_variance" in saved:
+            merged.at[idx, "Trends on Variance"] = saved.get("trends_on_variance", "")
+
+    merged["Comments on Variance"] = merged["Comments on Variance"].fillna("")
+    merged["Trends on Variance"] = merged["Trends on Variance"].fillna("")
+
+    return merged.drop(columns=["client_number_key", "client_name_key", "StoreKey"])
 
 
 # ============================================================
@@ -260,10 +349,20 @@ if events.empty:
     st.stop()
 
 events["Amount"] = pd.to_numeric(events["Amount"], errors="coerce")
-events["Year"] = pd.to_numeric(events["Year"], errors="coerce").astype("Int64")
-events["Renewed On"] = pd.to_datetime(events["Renewed On"], errors="coerce").dt.date
+events["Renewed Amount"] = pd.to_numeric(events["Renewed Amount"], errors="coerce")
+events["Budget & Renewed Amount Variance"] = pd.to_numeric(
+    events["Budget & Renewed Amount Variance"], errors="coerce"
+)
 
-events["Income"] = events["Amount"].apply(format_pula)
+# Auto-calculate variance when both amounts are available.
+calc_mask = events["Amount"].notna() & events["Renewed Amount"].notna()
+events.loc[calc_mask, "Budget & Renewed Amount Variance"] = (
+    events.loc[calc_mask, "Renewed Amount"] - events.loc[calc_mask, "Amount"]
+)
+
+events["Year"] = pd.to_numeric(events["Year"], errors="coerce").astype("Int64")
+events["Budget Amount"] = events["Amount"]
+events["Renewed Amount (P)"] = events["Renewed Amount"]
 events["RenewalDate_internal"] = events.apply(lambda r: renewal_date(r["Year"], r["Month"]), axis=1)
 events["DaysLeft_internal"] = events["RenewalDate_internal"].apply(days_left)
 events["Light"] = events.apply(lambda r: traffic_light(r["Status"], r["DaysLeft_internal"]), axis=1)
@@ -298,7 +397,7 @@ if search:
 # ============================================================
 #   KPI CARDS
 # ============================================================
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 
 total_clients_view = view["CLIENT NUMBER"].nunique()
 c1.metric("👥 Total Clients", f"{total_clients_view:,}")
@@ -309,29 +408,57 @@ c2.metric("📌 Ongoing", f"{ongoing_view:,}")
 renewed_view = (view["Status"] == "Renewed").sum()
 c3.metric("✅ Renewed", f"{renewed_view:,}")
 
-total_income_view = view["Amount"].sum()
-c4.metric("💰 Total Income", format_pula(total_income_view))
+total_budget_view = pd.to_numeric(view["Amount"], errors="coerce").sum()
+c4.metric("💰 Total Budgeted Amount", format_pula(total_budget_view))
+
+total_renewed_amount_view = pd.to_numeric(view["Renewed Amount"], errors="coerce").sum()
+c5.metric("💳 Total Renewed Amount", format_pula(total_renewed_amount_view))
 
 # ============================================================
 #   EDITABLE TABLE
 # ============================================================
-cols = ["CLIENT NUMBER", "CLIENT NAME", "Year", "Month", "Income", "Light", "Status", "Notes", "Renewed On"]
+cols = [
+    "CLIENT NUMBER",
+    "CLIENT NAME",
+    "Year",
+    "Month",
+    "Light",
+    "Status",
+    "Budget Amount",
+    "Renewed Amount (P)",
+    "Budget & Renewed Amount Variance",
+    "Comments on Variance",
+    "Trends on Variance",
+]
 tidy = view[cols].copy()
 
 col_cfg = {
     "CLIENT NUMBER": st.column_config.TextColumn(label="Client Number"),
     "CLIENT NAME": st.column_config.TextColumn(label="Client Name"),
-    "Income": st.column_config.TextColumn(label="Income (Pula)"),
+    "Budget Amount": st.column_config.NumberColumn(label="Budget Amount", format="P %.2f"),
+    "Renewed Amount (P)": st.column_config.NumberColumn(label="Renewed Amount (P)", format="P %.2f"),
+    "Budget & Renewed Amount Variance": st.column_config.NumberColumn(
+        label="Budget & Renewed Amount Variance", format="P %.2f"
+    ),
+    "Comments on Variance": st.column_config.TextColumn(label="Comments on Variance"),
+    "Trends on Variance": st.column_config.SelectboxColumn(
+        label="Trends on Variance", options=TREND_OPTIONS
+    ),
     "Light": st.column_config.TextColumn(label="⚫ Traffic"),
     "Status": st.column_config.SelectboxColumn(options=STATUS_OPTIONS, label="Status"),
-    "Notes": st.column_config.TextColumn(label="Notes"),
-    "Renewed On": st.column_config.DateColumn(label="Renewed On", format="YYYY-MM-DD", help="Select the renewal date"),
 }
 
 edited = st.data_editor(
     tidy,
     column_config=col_cfg,
-    disabled=["CLIENT NUMBER", "CLIENT NAME", "Income", "Light", "Year", "Month"],
+    disabled=[
+        "CLIENT NUMBER",
+        "CLIENT NAME",
+        "Budget & Renewed Amount Variance",
+        "Light",
+        "Year",
+        "Month",
+    ],
     use_container_width=True,
 )
 
@@ -342,19 +469,16 @@ if st.button("Save Changes"):
     status_store = load_status_store()
 
     for _, r in edited.iterrows():
-        renewed_on_val = r["Renewed On"]
-        if isinstance(renewed_on_val, pd.Timestamp):
-            renewed_on_val = renewed_on_val.date()
-        renewed_on_iso = to_iso_date(renewed_on_val)
-
-        if (r["Status"] == "Renewed") and (renewed_on_iso == ""):
-            renewed_on_iso = date.today().isoformat()
+        budget_amount_val = pd.to_numeric(r["Budget Amount"], errors="coerce")
+        renewed_amount_val = pd.to_numeric(r["Renewed Amount (P)"], errors="coerce")
 
         key = f"{r['CLIENT NUMBER']}_{int(r['Year'])}_{r['Month']}"
         status_store[key] = {
             "status": r["Status"],
-            "notes": r["Notes"] if r["Notes"] is not None else "",
-            "renewed_on": renewed_on_iso,
+            "amount": None if pd.isna(budget_amount_val) else float(budget_amount_val),
+            "renewed_amount": None if pd.isna(renewed_amount_val) else float(renewed_amount_val),
+            "comments_on_variance": r["Comments on Variance"] if r["Comments on Variance"] is not None else "",
+            "trends_on_variance": r["Trends on Variance"] if r["Trends on Variance"] is not None else "",
         }
 
     try:
@@ -364,3 +488,5 @@ if st.button("Save Changes"):
         st.rerun()
     except Exception as e:
         st.error(f"Failed to save updates: {e}")
+
+
