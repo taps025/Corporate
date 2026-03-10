@@ -188,7 +188,7 @@ def parse_sheet_2a(path: str, sheet_name: str) -> pd.DataFrame:
                         "Segment": segment,
                         "Name of Business": clean_business,
                         "Minet Client": _to_client_status(aon_val),
-                        "Estimated Premium (BWP)": amount,
+                        "Income": amount,
                     }
                 )
 
@@ -253,17 +253,17 @@ if view_mode == "Revenue Landscape":
                 seg_df = filtered.copy()
             else:
                 seg_df = filtered[filtered["Segment"] == label].copy()
-            seg_df = seg_df.sort_values(["Minet Client", "Estimated Premium (BWP)", "Name of Business"], ascending=[True, False, True])
+            seg_df = seg_df.sort_values(["Minet Client", "Income", "Name of Business"], ascending=[True, False, True])
 
             seg_businesses = len(seg_df)
             seg_minet = int((seg_df["Minet Client"] == "Yes").sum())
             seg_prospects = int((seg_df["Minet Client"] == "No").sum())
-            seg_premium = float(seg_df["Estimated Premium (BWP)"].fillna(0).sum())
+            seg_premium = float(seg_df["Income"].fillna(0).sum())
             seg_minet_income = float(
-                seg_df.loc[seg_df["Minet Client"] == "Yes", "Estimated Premium (BWP)"].fillna(0).sum()
+                seg_df.loc[seg_df["Minet Client"] == "Yes", "Income"].fillna(0).sum()
             )
             seg_non_minet_income = float(
-                seg_df.loc[seg_df["Minet Client"] == "No", "Estimated Premium (BWP)"].fillna(0).sum()
+                seg_df.loc[seg_df["Minet Client"] == "No", "Income"].fillna(0).sum()
             )
 
             m1, m2, m3, m5, m6 = st.columns(5)
@@ -271,18 +271,17 @@ if view_mode == "Revenue Landscape":
             m2.metric("Minet Clients", f"{seg_minet:,}")
             m3.metric("Prospects", f"{seg_prospects:,}")
             m5.metric("Current Income", f"P {seg_minet_income:,.2f}")
-            m6.metric("Estimated Income", f"P {seg_non_minet_income:,.2f}")
+            m6.metric("Prospects income", f"P {seg_non_minet_income:,.2f}")
 
             display_df = seg_df.copy()
             if label == "All Segments":
-                display_df = display_df[["Segment", "Name of Business", "Minet Client", "Estimated Premium (BWP)"]]
+                display_df = display_df[["Segment", "Name of Business", "Minet Client", "Income"]]
             else:
-                display_df = display_df[["Name of Business", "Minet Client", "Estimated Premium (BWP)"]]
-            display_df["Estimated Premium (BWP)"] = display_df["Estimated Premium (BWP)"].map(
+                display_df = display_df[["Name of Business", "Minet Client", "Income"]]
+            display_df["Income"] = display_df["Income"].map(
                 lambda x: f"{x:,.2f}" if pd.notna(x) else ""
             )
-            display_df = display_df.rename(columns={"Estimated Premium (BWP)": "Estimated Income (Pula)"})
-            display_df["Estimated Income (Pula)"] = display_df["Estimated Income (Pula)"].apply(
+            display_df["Income"] = display_df["Income"].apply(
                 lambda x: f"P {x}" if x else x
             )
             st.dataframe(display_df, use_container_width=True, hide_index=True)
@@ -298,12 +297,12 @@ else:
     total_businesses = len(filtered)
     total_minet = int((filtered["Minet Client"] == "Yes").sum())
     total_non_minet = int((filtered["Minet Client"] == "No").sum())
-    total_premium = float(filtered["Estimated Premium (BWP)"].fillna(0).sum())
+    total_premium = float(filtered["Income"].fillna(0).sum())
     total_minet_income = float(
-        filtered.loc[filtered["Minet Client"] == "Yes", "Estimated Premium (BWP)"].fillna(0).sum()
+        filtered.loc[filtered["Minet Client"] == "Yes", "Income"].fillna(0).sum()
     )
     total_non_minet_income = float(
-        filtered.loc[filtered["Minet Client"] == "No", "Estimated Premium (BWP)"].fillna(0).sum()
+        filtered.loc[filtered["Minet Client"] == "No", "Income"].fillna(0).sum()
     )
 
     m1, m2, m3, m5, m6 = st.columns(5)
@@ -311,12 +310,12 @@ else:
     m2.metric("Minet Clients", f"{total_minet:,}")
     m3.metric("Non-Minet", f"{total_non_minet:,}")
     m5.metric("Current Income", f"P {total_minet_income:,.2f}")
-    m6.metric("Estimated Income", f"P {total_non_minet_income:,.2f}")
+    m6.metric("Prospects income", f"P {total_non_minet_income:,.2f}")
 
     summary = filtered.groupby("Segment", as_index=False).agg(
         Businesses=("Name of Business", "count"),
         Minet_Clients=("Minet Client", lambda s: (s == "Yes").sum()),
-        Total_Premium_Pula=("Estimated Premium (BWP)", "sum"),
+        Total_Premium_Pula=("Income", "sum"),
     )
     summary = summary.sort_values("Total_Premium_Pula", ascending=False)
     summary["Minet Rate %"] = (summary["Minet_Clients"] / summary["Businesses"] * 100).round(1)
@@ -378,14 +377,14 @@ else:
     d1, d2 = st.columns(2)
     with d1:
         top_businesses = (
-            filtered.groupby(["Segment", "Name of Business"], as_index=False)["Estimated Premium (BWP)"]
+            filtered.groupby(["Segment", "Name of Business"], as_index=False)["Income"]
             .sum()
-            .sort_values("Estimated Premium (BWP)", ascending=False)
+            .sort_values("Income", ascending=False)
             .head(10)
         )
         fig_top = px.bar(
-            top_businesses.sort_values("Estimated Premium (BWP)"),
-            x="Estimated Premium (BWP)",
+            top_businesses.sort_values("Income"),
+            x="Income",
             y="Name of Business",
             orientation="h",
             color="Segment",
@@ -443,4 +442,3 @@ else:
         )
         fig_rate.update_traces(textfont=dict(color="#111111", size=14))
         st.plotly_chart(fig_rate, use_container_width=True)
-
