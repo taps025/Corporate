@@ -10,7 +10,7 @@ import streamlit as st
 # ============================================================
 #   PAGE CONFIG
 # ============================================================
-st.set_page_config(page_title="Corporate Renewal tracker", layout="wide")
+st.set_page_config(page_title="Corporate Renewaal tracker", layout="wide")
 
 # ---------- Brand colours ----------
 MINET_RED = "#cc0000"
@@ -179,6 +179,71 @@ def save_status_store(store: dict) -> None:
         json.dump(store, f, indent=4)
 
 
+def get_status_store_version() -> float:
+    try:
+        return Path(STATUS_FILE).stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def safe_text(value) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return str(value)
+
+
+def make_store_key(row) -> str:
+    year_val = pd.to_numeric(row["Year"], errors="coerce")
+    return f"{str(row['CLIENT NUMBER']).strip()}_{int(year_val)}_{row['Month']}"
+
+
+def build_store_payload(row) -> dict:
+    budget_amount = pd.to_numeric(row["Budget Amount"], errors="coerce")
+    renewed_amount = pd.to_numeric(row["Renewed Amount (P)"], errors="coerce")
+
+    return {
+        "status": safe_text(row["Status"]) or "On going",
+        "amount": None if pd.isna(budget_amount) else float(budget_amount),
+        "renewed_amount": None if pd.isna(renewed_amount) else float(renewed_amount),
+        "comments_on_variance": safe_text(row["Comments on Variance"]),
+        "trends_on_variance": safe_text(row["Trends on Variance"]),
+    }
+
+
+def editor_has_changes(original_df: pd.DataFrame, edited_df: pd.DataFrame) -> bool:
+    if len(original_df) != len(edited_df):
+        return True
+
+    for idx in range(len(edited_df)):
+        if build_store_payload(original_df.iloc[idx]) != build_store_payload(edited_df.iloc[idx]):
+            return True
+
+    return False
+
+
+def persist_editor_changes(edited_df: pd.DataFrame) -> bool:
+    status_store = load_status_store()
+    changed = False
+
+    for _, row in edited_df.iterrows():
+        key = make_store_key(row)
+        current_entry = status_store.get(key, {})
+        if not isinstance(current_entry, dict):
+            current_entry = {}
+
+        updated_entry = dict(current_entry)
+        updated_entry.update(build_store_payload(row))
+
+        if current_entry != updated_entry:
+            status_store[key] = updated_entry
+            changed = True
+
+    if changed:
+        save_status_store(status_store)
+
+    return changed
+
+
 def normalize_match_key(val) -> str:
     s = str(val).strip().lower()
     if s in {"", "nan", "none"}:
@@ -228,7 +293,8 @@ def load_budget_tracker_data() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=30)
-def load_events_from_excel() -> pd.DataFrame:
+def load_events_from_excel(status_store_version: float = 0.0) -> pd.DataFrame:
+    _ = status_store_version
     src = pd.read_excel(EXCEL_FILE, sheet_name=EXCEL_SHEET, engine="openpyxl")
     src.columns = [str(c).strip() for c in src.columns]
 
@@ -339,7 +405,7 @@ if not logo_data_uri:
 #   LOAD DATA FROM EXCEL
 # ============================================================
 try:
-    events = load_events_from_excel()
+    events = load_events_from_excel(get_status_store_version())
 except Exception as e:
     st.error(f"Cannot load {EXCEL_FILE}: {e}")
     st.stop()
@@ -431,6 +497,8 @@ cols = [
     "Trends on Variance",
 ]
 tidy = view[cols].copy()
+tidy["Comments on Variance"] = tidy["Comments on Variance"].fillna("")
+tidy["Trends on Variance"] = tidy["Trends on Variance"].fillna("")
 
 col_cfg = {
     "CLIENT NUMBER": st.column_config.TextColumn(label="Client Number"),
@@ -442,7 +510,7 @@ col_cfg = {
     ),
     "Comments on Variance": st.column_config.TextColumn(label="Comments on Variance"),
     "Trends on Variance": st.column_config.SelectboxColumn(
-        label="Trends on Variance", options=TREND_OPTIONS
+        label="Trends on Variance", options=[""] + TREND_OPTIONS
     ),
     "Light": st.column_config.TextColumn(label="⚫ Traffic"),
     "Status": st.column_config.SelectboxColumn(options=STATUS_OPTIONS, label="Status"),
@@ -465,27 +533,26 @@ edited = st.data_editor(
 # ============================================================
 #   SAVE STATUS TO LOCAL JSON
 # ============================================================
-if st.button("Save Changes"):
-    status_store = load_status_store()
+st.caption("Table edits save automatically and stay after refresh.")
 
-    for _, r in edited.iterrows():
-        budget_amount_val = pd.to_numeric(r["Budget Amount"], errors="coerce")
-        renewed_amount_val = pd.to_numeric(r["Renewed Amount (P)"], errors="coerce")
-
-        key = f"{r['CLIENT NUMBER']}_{int(r['Year'])}_{r['Month']}"
-        status_store[key] = {
-            "status": r["Status"],
-            "amount": None if pd.isna(budget_amount_val) else float(budget_amount_val),
-            "renewed_amount": None if pd.isna(renewed_amount_val) else float(renewed_amount_val),
-            "comments_on_variance": r["Comments on Variance"] if r["Comments on Variance"] is not None else "",
-            "trends_on_variance": r["Trends on Variance"] if r["Trends on Variance"] is not None else "",
-        }
-
+if editor_has_changes(tidy, edited):
     try:
-        save_status_store(status_store)
-        load_events_from_excel.clear()
-        st.success("Saved! Changes are stored in status_store.json.")
-        st.rerun()
+        if persist_editor_changes(edited):
+            st.session_state["renewal_changes_saved"] = True
+            st.rerun()
+    except Exception as e:
+        st.error(f"Failed to save updates: {e}")
+
+if st.session_state.pop("renewal_changes_saved", False):
+    st.success("Saved! Changes are stored in status_store.json.")
+
+if st.button("Save Changes Now"):
+    try:
+        if persist_editor_changes(edited):
+            st.success("Saved! Changes are stored in status_store.json.")
+            st.rerun()
+        else:
+            st.info("No new changes to save.")
     except Exception as e:
         st.error(f"Failed to save updates: {e}")
 
