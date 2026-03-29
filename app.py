@@ -1,6 +1,7 @@
 import base64
 import json
 import mimetypes
+import os
 from datetime import date
 from pathlib import Path
 
@@ -10,7 +11,7 @@ import streamlit as st
 # ============================================================
 #   PAGE CONFIG
 # ============================================================
-st.set_page_config(page_title="Corporate Renewaal tracker", layout="wide")
+st.set_page_config(page_title="Corporate Renewal tracker", layout="wide")
 
 # ---------- Brand colours ----------
 MINET_RED = "#cc0000"
@@ -18,10 +19,12 @@ BLACK = "#111111"
 WHITE = "#FFFFFF"
 
 # ---------- Local data files ----------
-EXCEL_FILE = "Jenn.xlsx"
+APP_DIR = Path(__file__).resolve().parent
+
+EXCEL_FILE = APP_DIR / "Jenn.xlsx"
 EXCEL_SHEET = "Renewal book 2026"
-STATUS_FILE = "status_store.json"
-TRACKER_FILE = "Client Renewal & Budget Tracker.xlsx"
+STATUS_FILE = APP_DIR / "status_store.json"
+TRACKER_FILE = APP_DIR / "Client Renewal & Budget Tracker.xlsx"
 TRACKER_SHEET = "Corporates & Parastatals"
 
 STATUS_OPTIONS = ["On going", "Renewed", "Organic growth", "Lost", "Not renewing", "Awaiting POP"]
@@ -167,7 +170,7 @@ def find_logo_bytes() -> tuple[str | None, str | None]:
 
 def load_status_store() -> dict:
     try:
-        with open(STATUS_FILE, "r", encoding="utf-8") as f:
+        with STATUS_FILE.open("r", encoding="utf-8") as f:
             data = json.load(f)
             return data if isinstance(data, dict) else {}
     except Exception:
@@ -175,8 +178,15 @@ def load_status_store() -> dict:
 
 
 def save_status_store(store: dict) -> None:
-    with open(STATUS_FILE, "w", encoding="utf-8") as f:
-        json.dump(store, f, indent=4)
+    STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = STATUS_FILE.with_name(f"{STATUS_FILE.name}.tmp")
+
+    with temp_file.open("w", encoding="utf-8") as f:
+        json.dump(store, f, indent=4, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+
+    temp_file.replace(STATUS_FILE)
 
 
 def get_status_store_version() -> float:
@@ -533,8 +543,6 @@ edited = st.data_editor(
 # ============================================================
 #   SAVE STATUS TO LOCAL JSON
 # ============================================================
-st.caption("Table edits save automatically and stay after refresh.")
-
 if editor_has_changes(tidy, edited):
     try:
         if persist_editor_changes(edited):
@@ -544,12 +552,12 @@ if editor_has_changes(tidy, edited):
         st.error(f"Failed to save updates: {e}")
 
 if st.session_state.pop("renewal_changes_saved", False):
-    st.success("Saved! Changes are stored in status_store.json.")
+    st.success("Saved! Changes are stored in status_store.json in the app folder.")
 
 if st.button("Save Changes Now"):
     try:
         if persist_editor_changes(edited):
-            st.success("Saved! Changes are stored in status_store.json.")
+            st.success("Saved! Changes are stored in status_store.json in the app folder.")
             st.rerun()
         else:
             st.info("No new changes to save.")
